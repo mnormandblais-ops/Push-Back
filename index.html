@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pawn Push - Iterative Deepening Engine</title>
+    <style>
+        body {
+            margin: 0;
+            background: #1e1e24;
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        h1 { margin: 10px 0 5px 0; font-weight: 600; }
+        #status { font-size: 1.2rem; margin-bottom: 15px; height: 24px; color: #a0a0a5; font-weight: bold; }
+        canvas {
+            background: #2a2a32;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            cursor: pointer;
+        }
+        .controls { margin-top: 15px; display: flex; gap: 15px; align-items: center; }
+        button {
+            background: #4f46e5; color: white; border: none; padding: 10px 20px;
+            font-size: 1rem; border-radius: 6px; cursor: pointer; font-weight: bold;
+        }
+        button:hover { background: #6366f1; }
+        select {
+            background: #2a2a32; color: white; border: 2px solid #4b5563;
+            padding: 8px 12px; font-size: 1rem; border-radius: 6px; cursor: pointer;
+        }
+        #sim-info { margin-top: 10px; font-size: 0.85rem; color: #6b7280; }
+    </style>
+</head>
+<body>
+
+    <h1>Pawn Push</h1>
+    <div id="status">Your turn (White ⚪)</div>
+    
+    <canvas id="gameCanvas" width="320" height="480"></canvas>
+
+    <div class="controls">
+        <label for="firstPlayer">First Move: </label>
+        <select id="firstPlayer" onchange="resetGame()">
+            <option value="1">White ⚪ (Player)</option>
+            <option value="-1">Black ⚫ (AI)</option>
+        </select>
+        <button onclick="resetGame()">Restart Game</button>
+    </div>
+    <div id="sim-info">Engine: Ready</div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        const simInfoDiv = document.getElementById('sim-info');
+        const firstPlayerSelect = document.getElementById('firstPlayer');
+
+        const ROWS = 6;
+        const COLS = 4;
+        const CELL_W = 80;
+        const CELL_H = 80;
+
+        let state = {
+            board: [
+                -1, -1, -1, -1,
+                 0,  0,  0,  0,
+                 0,  0,  0,  0,
+                 0,  0,  0,  0,
+                 0,  0,  0,  0,
+                 1,  1,  1,  1
+            ],
+            hasMoved: Array(24).fill(false), 
+            enPassantSquare: null,           
+            turn: 1, 
+            gameOver: false
+        };
+
+        let selectedSquare = null;
+        let legalMovesForSelected = [];
+
+        // --- Core Rules & Move Generator ---
+        function getLegalMoves(gameState, side) {
+            let moves = [];
+            const dir = side === 1 ? -1 : 1; 
+            
+            for (let i = 0; i < 24; i++) {
+                if (gameState.board[i] !== side) continue;
+                
+                let r = Math.floor(i / COLS);
+                let c = i % COLS;
+
+                let nextR = r + dir;
+                if (nextR >= 0 && nextR < ROWS) {
+                    let target = nextR * COLS + c;
+                    if (gameState.board[target] === 0) {
+                        moves.push({ from: i, to: target, type: 'step', epClear: true });
+                        
+                        let doubleR = r + 2 * dir;
+                        let isRowStart = (side === 1 && r === ROWS - 1) || (side === -1 && r === 0);
+                        if (isRowStart && !gameState.hasMoved[i]) {
+                            let doubleTarget = doubleR * COLS + c;
+                            if (gameState.board[doubleTarget] === 0) {
+                                moves.push({ from: i, to: doubleTarget, type: 'double', epSet: target, epClear: false });
+                            }
+                        }
+                    }
+                }
+
+                let diagonals = [c - 1, c + 1];
+                for (let dc of diagonals) {
+                    if (dc < 0 || dc >= COLS) continue;
+                    let targetR = r + dir;
+                    let target = targetR * COLS + dc;
+                    
+                    if (gameState.board[target] === -side) {
+                        let pushR = targetR + dir; 
+                        if (pushR >= 0 && pushR < ROWS) {
+                            let pushTarget = pushR * COLS + dc;
+                            if (gameState.board[pushTarget] === 0) {
+                                moves.push({ from: i, to: target, type: 'capture', pushTo: pushTarget, epClear: true });
+                            }
+                        }
+                    }
+                    
+                    if (target === gameState.enPassantSquare) {
+                        let victimSquare = r * COLS + dc; 
+                        if (gameState.board[victimSquare] === -side) {
+                            let pushR = r + 2 * dir; 
+                            if (pushR >= 0 && pushR < ROWS) {
+                                let pushTarget = pushR * COLS + dc;
+                                if (gameState.board[pushTarget] === 0) {
+                                    moves.push({ from: i, to: target, type: 'enpassant', victim: victimSquare, pushTo: pushTarget, epClear: true });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return moves;
+        }
+
+        function makeMove(gameState, move) {
+            let nextState = {
+                board: [...gameState.board],
+                hasMoved: [...gameState.hasMoved],
+                enPassantSquare: move.epSet !== undefined ? move.epSet : null,
+                turn: -gameState.turn,
+                gameOver: false
+            };
+
+            const side = gameState.board[move.from];
+            nextState.board[move.from] = 0;
+
+            if (move.type === 'step' || move.type === 'double') {
+                nextState.board[move.to] = side;
+            } else if (move.type === 'capture') {
+                nextState.board[move.pushTo] = -side; 
+                nextState.board[move.to] = side;     
+            } else if (move.type === 'enpassant') {
+                nextState.board[move.victim] = 0;     
+                nextState.board[move.pushTo] = -side; 
+                nextState.board[move.to] = side;     
+            }
+
+            nextState.hasMoved[move.to] = true;
+            nextState.hasMoved[move.from] = false;
+
+            let winner = checkWinner(nextState);
+            if (winner !== 0 || getLegalMoves(nextState, nextState.turn).length === 0) {
+                nextState.gameOver = true;
+            }
+
+            return nextState;
+        }
+
+        function checkWinner(gameState) {
+            for (let c = 0; c < COLS; c++) {
+                if (gameState.board[c] === 1) return 1;
+                if (gameState.board[(ROWS - 1) * COLS + c] === -1) return -1;
+            }
+            return 0;
+        }
+
+        // --- Alpha-Beta Search Engine ---
+        const MAX_TARGET_DEPTH = 10; 
+        let nodesEvaluated = 0;
+
+        function evaluateBoard(gameState) {
+            nodesEvaluated++;
+            let score = 0;
+            
+            // 1. Physical back-rank win gets top score boundary
+            let winner = checkWinner(gameState);
+            if (winner === 1) return 20000;
+            if (winner === -1) return -20000;
+
+            // 2. Stalemate traps get secondary score weight
+            if (getLegalMoves(gameState, gameState.turn).length === 0) {
+                return gameState.turn === 1 ? -10000 : 10000;
+            }
+
+            // 3. Middle-game positional valuation
+            for (let i = 0; i < 24; i++) {
+                let piece = gameState.board[i];
+                if (piece === 0) continue;
+
+                let r = Math.floor(i / COLS);
+
+                if (piece === 1) { 
+                    score += 10;                     
+                    score += (ROWS - 1 - r) * 3;     
+                } else if (piece === -1) { 
+                    score -= 10;                     
+                    score -= r * 3;                  
+                }
+            }
+            return score;
+        }
+
+        function alphaBeta(gameState, depth, alpha, beta, side) {
+            if (depth === 0 || gameState.gameOver) {
+                return { score: evaluateBoard(gameState), move: null };
+            }
+
+            let legalMoves = getLegalMoves(gameState, side);
+            
+            legalMoves.sort((a, b) => {
+                let scoreA = (a.type === 'capture' || a.type === 'enpassant') ? 1 : 0;
+                let scoreB = (b.type === 'capture' || b.type === 'enpassant') ? 1 : 0;
+                return scoreB - scoreA;
+            });
+
+            let bestMove = null;
+
+            if (side === 1) { // White/Maximizing
+                let maxEval = -Infinity;
+                for (let move of legalMoves) {
+                    let nextState = makeMove(gameState, move);
+                    let evaluation = alphaBeta(nextState, depth - 1, alpha, beta, -1).score;
+                    if (evaluation > maxEval) {
+                        maxEval = evaluation;
+                        bestMove = move;
+                    }
+                    alpha = Math.max(alpha, evaluation);
+                    if (beta <= alpha) break; 
+                }
+                return { score: maxEval, move: bestMove };
+            } else { // Black/Minimizing
+                let minEval = Infinity;
+                for (let move of legalMoves) {
+                    let nextState = makeMove(gameState, move);
+                    let evaluation = alphaBeta(nextState, depth - 1, alpha, beta, 1).score;
+                    if (evaluation < minEval) {
+                        minEval = evaluation;
+                        bestMove = move;
+                    }
+                    beta = Math.min(beta, evaluation);
+                    if (beta <= alpha) break; 
+                }
+                return { score: minEval, move: bestMove };
+            }
+        }
+
+        // --- Iterative Deepening Framework ---
+        function runIterativeDeepeningAI(rootState) {
+            nodesEvaluated = 0;
+            let start = performance.now();
+            let finalBestMove = null;
+
+            for (let currentDepth = 1; currentDepth <= MAX_TARGET_DEPTH; currentDepth++) {
+                let result = alphaBeta(rootState, currentDepth, -Infinity, Infinity, -1);
+                
+                if (result.move) {
+                    finalBestMove = result.move;
+                }
+
+                // FIXED: Only break early if an absolute physical breakthrough win (>= 20000) is hit.
+                // Stalemates (10000) will no longer kill the search early.
+                if (result.score <= -20000 || result.score >= 20000) {
+                    break;
+                }
+            }
+            
+            let end = performance.now();
+            simInfoDiv.textContent = `Iterative Deepening: ${nodesEvaluated} total nodes analyzed in ${Math.round(end - start)}ms`;
+            return finalBestMove;
+        }
+
+        // --- Graphics & Rendering ---
+        function drawGame() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    ctx.fillStyle = (r + c) % 2 === 0 ? '#34343d' : '#24242b';
+                    ctx.fillRect(c * CELL_W, r * CELL_H, CELL_W, CELL_H);
+
+                    if (selectedSquare !== null && (r * COLS + c) === selectedSquare) {
+                        ctx.fillStyle = 'rgba(79, 70, 229, 0.4)';
+                        ctx.fillRect(c * CELL_W, r * CELL_H, CELL_W, CELL_H);
+                    }
+                }
+            }
+
+            for (let m of legalMovesForSelected) {
+                ctx.fillStyle = 'rgba(34, 197, 94, 0.5)';
+                ctx.beginPath();
+                ctx.arc((m.to % COLS) * CELL_W + CELL_W/2, Math.floor(m.to / COLS) * CELL_H + CELL_H/2, 12, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            for (let i = 0; i < 24; i++) {
+                let r = Math.floor(i / COLS);
+                let c = i % COLS;
+                let val = state.board[i];
+
+                if (val !== 0) {
+                    ctx.shadowBlur = 4;
+                    ctx.shadowColor = "rgba(0,0,0,0.3)";
+                    
+                    ctx.fillStyle = val === 1 ? '#f3f4f6' : '#111827';
+                    ctx.strokeStyle = val === 1 ? '#9ca3af' : '#374151';
+                    ctx.lineWidth = 3;
+
+                    let cx = c * CELL_W + CELL_W / 2;
+                    let cy = r * CELL_H + CELL_H / 2;
+
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, 24, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+                    ctx.strokeStyle = val === 1 ? '#d1d5db' : '#4b5563';
+                    ctx.stroke();
+
+                    ctx.shadowBlur = 0; 
+                }
+            }
+        }
+
+        function triggerAI() {
+            if (state.gameOver) return;
+            statusDiv.textContent = "AI is thinking... 🤔";
+
+            setTimeout(() => {
+                let aiMove = runIterativeDeepeningAI(state);
+                if (aiMove) {
+                    state = makeMove(state, aiMove);
+                    drawGame();
+                    processEndGameCheck();
+                }
+            }, 60);
+        }
+
+        function processEndGameCheck() {
+            let winStatus = checkWinner(state);
+            let whiteMovesAvailable = getLegalMoves(state, 1).length;
+            let blackMovesAvailable = getLegalMoves(state, -1).length;
+
+            if (winStatus === 1) {
+                statusDiv.textContent = "You Win! 🎉 ⚪";
+                state.gameOver = true;
+            } else if (winStatus === -1) {
+                statusDiv.textContent = "AI Wins! 🤖 ⚫";
+                state.gameOver = true;
+            } else if (state.turn === 1 && whiteMovesAvailable === 0) {
+                statusDiv.textContent = "Stalemate! No turns remaining.";
+                state.gameOver = true;
+            } else if (state.turn === -1 && blackMovesAvailable === 0) {
+                statusDiv.textContent = "Stalemate! AI is blocked.";
+                state.gameOver = true;
+            } else {
+                if (state.turn === 1) {
+                    statusDiv.textContent = "Your turn (White ⚪)";
+                } else {
+                    triggerAI();
+                }
+            }
+        }
+
+        // --- Event Listeners ---
+        canvas.addEventListener('click', (e) => {
+            if (state.gameOver || state.turn !== 1) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const clickY = e.clientY - rect.top;
+
+            const col = Math.floor(clickX / CELL_W);
+            const row = Math.floor(clickY / CELL_H);
+            const index = row * COLS + col;
+
+            let matchedMove = legalMovesForSelected.find(m => m.to === index);
+            if (matchedMove) {
+                state = makeMove(state, matchedMove);
+                selectedSquare = null;
+                legalMovesForSelected = [];
+                drawGame();
+                processEndGameCheck();
+                return;
+            }
+
+            if (state.board[index] === 1) {
+                selectedSquare = index;
+                let allMoves = getLegalMoves(state, 1);
+                legalMovesForSelected = allMoves.filter(m => m.from === index);
+            } else {
+                selectedSquare = null;
+                legalMovesForSelected = [];
+            }
+            drawGame();
+        });
+
+        function resetGame() {
+            const initialTurn = parseInt(firstPlayerSelect.value);
+            state = {
+                board: [
+                    -1, -1, -1, -1,
+                     0,  0,  0,  0,
+                     0,  0,  0,  0,
+                     0,  0,  0,  0,
+                     0,  0,  0,  0,
+                     1,  1,  1,  1
+                ],
+                hasMoved: Array(24).fill(false),
+                enPassantSquare: null,
+                turn: initialTurn,
+                gameOver: false
+            };
+            selectedSquare = null;
+            legalMovesForSelected = [];
+            
+            if (initialTurn === 1) {
+                statusDiv.textContent = "Your turn (White ⚪)";
+                simInfoDiv.textContent = "Engine: Ready";
+                drawGame();
+            } else {
+                drawGame();
+                triggerAI();
+            }
+        }
+
+        resetGame();
+    </script>
+</body>
+</html>
